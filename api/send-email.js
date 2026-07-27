@@ -5,29 +5,23 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const key = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.RESEND_FROM_EMAIL;
-  const signoff = process.env.MAIL_SIGNOFF || "Trade Desk";
-  if (!key || !fromEmail) return res.status(500).json({ error: "Resend env vars not set" });
+  const { to, subject, body, resendKey, fromEmail } = req.body || {};
+  if (!resendKey || !fromEmail || !to) {
+    return res.status(400).json({ error: "Missing resendKey, fromEmail, or to" });
+  }
 
   try {
-    const { to, subject, body } = req.body || {};
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${resendKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: `${signoff} <${fromEmail}>`,
-        to: [to],
-        subject,
-        text: body,
-      }),
+      body: JSON.stringify({ from: fromEmail, to: [to], subject, text: body }),
     });
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json(data);
-    return res.status(200).json({ ok: true, id: data.id });
+    return res.status(200).json({ ok: true, data });
   } catch (e) {
     return res.status(500).json({ error: String(e.message || e) });
   }
