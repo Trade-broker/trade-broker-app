@@ -210,22 +210,38 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
   }, [autoOn, busy, buyers, suppliers, leads]); // eslint-disable-line
 
   // ── APPROVE / DECLINE messages ──
+  // FIXED: sends now route through /api/send-email and /api/send-sms (serverless
+  // relays) instead of calling Resend/Twilio directly from the browser, which
+  // was blocked by CORS and caused "Send failed — kept in queue" errors.
   const approveMsg = async (item) => {
     const useReal = item.channel === "email" ? emailReady : smsReady;
     let delivery = "handoff";
     if (useReal && item.to_addr) {
       try {
-        // send via per-user provider keys
         if (item.channel === "email") {
-          const r = await fetch("https://api.resend.com/emails", {
-            method:"POST", headers:{ Authorization:`Bearer ${p.resend_key}`, "Content-Type":"application/json" },
-            body: JSON.stringify({ from:`${p.signoff||"Trade Desk"} <${p.from_email}>`, to:[item.to_addr], subject:item.subject, text:item.body }),
+          const r = await fetch("/api/send-email", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              to: item.to_addr,
+              subject: item.subject,
+              body: item.body,
+              resendKey: p.resend_key,
+              fromEmail: `${p.signoff || "Trade Desk"} <${p.from_email}>`,
+            }),
           });
           if (!r.ok) throw new Error(await r.text());
         } else {
-          const form = new URLSearchParams({ To:item.to_addr, From:p.twilio_from, Body:item.body });
-          const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${p.twilio_sid}/Messages.json`, {
-            method:"POST", headers:{ Authorization:"Basic "+btoa(`${p.twilio_sid}:${p.twilio_token}`), "Content-Type":"application/x-www-form-urlencoded" }, body: form.toString(),
+          const r = await fetch("/api/send-sms", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              to: item.to_addr,
+              body: item.body,
+              twilioSid: p.twilio_sid,
+              twilioToken: p.twilio_token,
+              twilioFrom: p.twilio_from,
+            }),
           });
           if (!r.ok) throw new Error(await r.text());
         }
