@@ -31,6 +31,108 @@ const NAV = [
 // small helpers
 const fmtMoney = (n, cur="USD") => `${cur} ${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 
+// Reads an error message from a failed fetch Response, preferring a JSON
+// { error } field (returned by /api/send-email and /api/send-sms) and
+// falling back to raw text if the body isn't JSON.
+const readErrorMessage = async (res) => {
+  const raw = await res.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.error || parsed?.message || raw || `Request failed (${res.status})`;
+  } catch {
+    return raw || `Request failed (${res.status})`;
+  }
+};
+
+// ── COMPANY / LEGAL / FOOTER ──
+const COMPANY = { name: "BLACK GOLD NEXUS (PTY) LTD", reg: "2026/565924/07", email: "blackgoldnexus@gmail.com" };
+
+const LEGAL_TEXT = {
+  terms: `TERMS AND CONDITIONS — TEMPLATE, REVIEW WITH A QUALIFIED ATTORNEY BEFORE PUBLISHING
+
+1. Acceptance
+By using Opportunity Command AI (the "App"), operated by ${COMPANY.name} (Reg: ${COMPANY.reg}), you agree to these Terms.
+
+2. Nature of the Service
+The App is an internal trade-brokerage tool providing AI-assisted lead discovery, outreach drafting, deal tracking, and document generation. It does not itself execute contracts, guarantee outcomes, or replace professional legal, tax, or financial advice.
+
+3. Your Responsibilities
+You are the sole sender of any approved message and are responsible for reviewing all AI-proposed leads, outreach, and generated documents before acting on them.
+
+4. No Guarantees
+${COMPANY.name} makes no warranty that any lead, deal, or opportunity identified through the App will result in a successful transaction or profit.
+
+5. Limitation of Liability
+To the maximum extent permitted by law, ${COMPANY.name} is not liable for indirect, incidental, or consequential losses arising from use of the App.
+
+6. Governing Law
+These Terms are governed by the laws of South Africa.
+
+Contact: ${COMPANY.email}`,
+
+  privacy: `PRIVACY POLICY — TEMPLATE, REVIEW WITH A QUALIFIED ATTORNEY BEFORE PUBLISHING
+
+1. Information We Process
+Buyer, supplier, opportunity, message, and business/banking data you enter is stored in your account to operate the App. Content sent to the AI provider is processed solely to generate the requested drafts.
+
+2. Purpose
+Information is used to run your trade-brokerage operations within the App — it is not sold or shared with third parties for marketing.
+
+3. Your Rights (POPIA)
+Under the Protection of Personal Information Act, you may request access to, correction of, or deletion of personal information processed through the App. Contact ${COMPANY.email}.
+
+4. Security
+Reasonable technical measures (including per-user authentication and row-level security) protect stored data. No system is completely secure.
+
+5. Retention
+Data is retained for as long as your account is active, or as required by law.
+
+Contact: ${COMPANY.email}`,
+
+  disclaimer: `DISCLAIMER — TEMPLATE, REVIEW WITH A QUALIFIED ATTORNEY BEFORE PUBLISHING
+
+Opportunity Command AI is an internal decision-support tool. AI-proposed leads are research candidates only, not confirmed buyers or suppliers, and must be independently verified. AI-drafted messages and legal/commercial document templates are provided "as is" and are not legal, financial, or tax advice — have them reviewed by a qualified South African attorney before use.
+
+${COMPANY.name} (Reg: ${COMPANY.reg}) accepts no liability for actions taken based on AI-generated content without independent verification.`,
+};
+
+function Footer({ onOpenLegal }) {
+  const year = new Date().getFullYear();
+  return (
+    <div className="mt-10 pt-6 border-t max-w-5xl mx-auto w-full" style={{ borderColor: T.border }}>
+      <div className="grid sm:grid-cols-3 gap-6">
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest mb-2.5" style={{ color: T.muted }}>Useful Resources</div>
+          <div className="flex flex-col gap-1.5 text-xs" style={{ color: T.dim }}>
+            <span>Trade brokerage document templates</span>
+            <span>Commission &amp; invoicing guidance</span>
+            <span>Compliance calendar (CIPC annual return)</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest mb-2.5" style={{ color: T.muted }}>Need Help?</div>
+          <div className="flex flex-col gap-1.5 text-xs" style={{ color: T.dim }}>
+            <span>Support: {COMPANY.email}</span>
+            <span>CIPC: www.cipc.co.za · 0861 002 472</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest mb-2.5" style={{ color: T.muted }}>Legal</div>
+          <div className="flex flex-col gap-1.5 text-xs">
+            <button onClick={() => onOpenLegal("terms")} className="text-left underline" style={{ color: T.dim }}>Terms and Conditions</button>
+            <button onClick={() => onOpenLegal("privacy")} className="text-left underline" style={{ color: T.dim }}>Privacy Policy</button>
+            <button onClick={() => onOpenLegal("disclaimer")} className="text-left underline" style={{ color: T.dim }}>Disclaimer</button>
+          </div>
+        </div>
+      </div>
+      <div className="mt-6 pt-4 border-t flex flex-col sm:flex-row items-center justify-between gap-2 text-xs" style={{ borderColor: T.border, color: T.dim }}>
+        <span>© {year} {COMPANY.name} — Reg: {COMPANY.reg}. All rights reserved.</span>
+        <span>Opportunity Command AI</span>
+      </div>
+    </div>
+  );
+}
+
 export default function MainApp({ session, profile, onLogout, refreshProfile }) {
   const uid = session.user.id;
   const [tab, setTab] = useState("dashboard");
@@ -50,11 +152,13 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
 
   // ui state
   const [busy, setBusy] = useState("");
+  const [quickFocus, setQuickFocus] = useState("");
   const [autoOn, setAutoOn] = useState(false);
   const [briefing, setBriefing] = useState("");
   const [chatAgent, setChatAgent] = useState(null);
   const [viewDoc, setViewDoc] = useState(null);
   const [docGenType, setDocGenType] = useState(null);
+  const [legalDoc, setLegalDoc] = useState(null);
 
   // editable settings (profile mirror)
   const [p, setP] = useState(profile || {});
@@ -93,13 +197,18 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
   const cur = p.currency || "USD";
 
   // ── AI: LEAD FINDER ──
-  const runLeadFinder = async () => {
+  // Accepts an optional `overrideFocus` so the person can search for
+  // ANYTHING on the spot ("solar panels" today, "grass" tomorrow,
+  // "building materials" after that) without ever touching Settings.
+  // If left blank, falls back to the persisted default in p.focus.
+  const runLeadFinder = async (overrideFocus) => {
     if (busy) return;
     setBusy("leads");
-    await logFeed("🔎 Lead Finder AI searching the web for candidates…", T.cyan);
+    const activeFocus = (overrideFocus && overrideFocus.trim()) || p.focus;
+    await logFeed(`🔎 Lead Finder AI searching the web for: ${activeFocus || "broad bulk trade"}…`, T.cyan);
     try {
       const existing = [...buyers.map(b=>b.name), ...suppliers.map(s=>s.name), ...leads.map(l=>l.name)];
-      const found = await findLeads({ focus: p.focus, market: p.market, existing });
+      const found = await findLeads({ focus: activeFocus, market: p.market, existing });
       if (!found.length) { await logFeed("No new candidates this pass.", T.muted); notify("No new leads found"); return; }
       const rows = found.map(l => ({
         user_id: uid, kind: l.kind || "buyer", name: l.name, country: l.country || "",
@@ -159,7 +268,56 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
     } catch (e) { await logFeed(`⚠️ Draft error for ${lead.name}: ${e.message}`, T.red); }
   };
 
-  // ── AUTOPILOT: find leads + propose opportunities ──
+  // ── RELATIONSHIP AI: nurture check-ins for existing contacts ──
+  // Drafts a warm, non-salesy message (not a pitch) to keep an existing
+  // relationship warm. Goes through the same approval queue as everything else.
+  const draftCheckIn = async (contact, kind) => {
+    try {
+      const channel = contact.email ? "email" : (contact.phone ? "sms" : "email");
+      const to_addr = channel === "sms" ? (contact.phone || "") : (contact.email || "");
+      if (!to_addr) { notify(`No ${channel === "sms" ? "phone" : "email"} on file for ${contact.name}`, "error"); return; }
+      const sys = "You are Relationship AI for a trade broker. Write a brief, warm check-in message to an existing contact — not a sales pitch. The goal is to keep the relationship active: share a short relevant market observation, ask how things are going on their end, or reference their industry. Written only. No profit guarantees. Sign off with the broker's sign-off.";
+      const prompt = `Draft a relationship check-in ${channel} to ${contact.name} (${contact.country || ""}, ${kind === "supplier" ? contact.product : contact.industry}). They are an existing ${kind} contact — this is NOT a first pitch, it's a friendly touch-base to stay top of mind. Broker focus: ${p.focus || "bulk trade"}. Sign off: "${p.signoff || "Trade Operations"}". Under 100 words, no hard sell. Return JSON: { "subject": "", "body": "" }`;
+      const data = await callClaude([{ role:"user", content: prompt }], sys);
+      const r = parseJSON(data.text);
+      const row = {
+        user_id: uid, agent: "Relationship AI", channel,
+        recipient_type: kind, recipient_name: contact.name,
+        to_addr, subject: r.subject || "Checking in", body: r.body || "", rationale: "Relationship check-in", status: "pending",
+      };
+      const { data: q } = await supabase.from("queue").insert(row).select().single();
+      if (q) setQueue(prev => [q, ...prev]);
+      await logFeed(`💬 Check-in drafted for ${contact.name} — awaiting approval`, T.blue);
+      notify(`Check-in drafted for ${contact.name} ✓`);
+    } catch (e) {
+      await logFeed(`⚠️ Check-in draft error for ${contact.name}: ${e.message}`, T.red);
+      notify("Check-in draft failed", "error");
+    }
+  };
+
+  // Days since last message SENT to a given contact (by matching to_addr against
+  // the sent log). Returns null if never contacted OR if the data is malformed
+  // (defensive — avoids "Invalid Date"/NaN breaking the Contacts tab).
+  const daysSinceContact = (contact) => {
+    const addr = contact.email || contact.phone;
+    if (!addr) return null;
+    const matches = sent.filter(m => m.to_addr === addr && m.sent_at && !isNaN(new Date(m.sent_at).getTime()));
+    if (!matches.length) return null;
+    const latest = matches.reduce((a, b) => new Date(a.sent_at) > new Date(b.sent_at) ? a : b);
+    const diffMs = Date.now() - new Date(latest.sent_at).getTime();
+    if (!isFinite(diffMs) || diffMs < 0) return null;
+    return Math.floor(diffMs / 86400000);
+  };
+
+  // Color + label for a "days since contact" badge
+  const contactHealthBadge = (days) => {
+    if (days === null) return { label: "Never contacted", color: T.dim };
+    if (days <= 13) return { label: `Contacted ${days}d ago`, color: T.green };
+    if (days <= 30) return { label: `${days}d since contact`, color: T.amber };
+    return { label: `${days}d — going cold`, color: T.red };
+  };
+
+
   const runAutopilot = async () => {
     if (busy) return;
     setBusy("auto");
@@ -230,7 +388,7 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
               fromEmail: `${p.signoff || "Trade Desk"} <${p.from_email}>`,
             }),
           });
-          if (!r.ok) throw new Error(await r.text());
+          if (!r.ok) throw new Error(await readErrorMessage(r));
         } else {
           const r = await fetch("/api/send-sms", {
             method: "POST",
@@ -243,7 +401,7 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
               twilioFrom: p.twilio_from,
             }),
           });
-          if (!r.ok) throw new Error(await r.text());
+          if (!r.ok) throw new Error(await readErrorMessage(r));
         }
         delivery = "sent";
         await logFeed(`📤 ${item.channel} sent to ${item.recipient_name}`, T.green);
@@ -261,13 +419,19 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
       await logFeed(`📲 Approved — opened ${item.channel} app for ${item.recipient_name}`, T.blue);
       notify(`Approved — opened ${item.channel} app`);
     }
-    // move to sent, remove from queue
-    await supabase.from("sent").insert({ user_id: uid, channel:item.channel, recipient_name:item.recipient_name, to_addr:item.to_addr, subject:item.subject, body:item.body, delivery });
+    // move to sent, remove from queue (explicit sent_at so this doesn't depend
+    // on the DB column having a default — fixes "Invalid Date" / broken
+    // days-since-contact calculations if the schema lacks one)
+    await supabase.from("sent").insert({ user_id: uid, channel:item.channel, recipient_name:item.recipient_name, to_addr:item.to_addr, subject:item.subject, body:item.body, delivery, sent_at: new Date().toISOString() });
     await supabase.from("queue").delete().eq("id", item.id);
     setQueue(prev => prev.filter(q => q.id!==item.id));
     loadAll();
-    // advance a deal one stage
-    advanceDeal();
+    // FIXED: previously this ran for every approved message (including
+    // relationship check-ins), silently advancing an unrelated opportunity —
+    // sometimes all the way to "Won", auto-booking a fake commission and
+    // generating a real invoice from nothing. Now it only runs for genuine
+    // deal outreach, never for check-ins.
+    if (item.agent === "Outreach AI") advanceDeal();
   };
   const declineMsg = async (item) => {
     await supabase.from("queue").delete().eq("id", item.id);
@@ -467,7 +631,7 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <div className="flex items-center gap-4 px-6 py-3 border-b flex-shrink-0" style={{ background:"#06070d", borderColor:T.border }}>
           <div className="flex-1 text-sm font-bold text-white truncate">Welcome, {p.owner_name || "Commander"}</div>
-          <Btn onClick={runLeadFinder} disabled={!!busy} sm color={T.cyan}><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find Leads"}</Btn>
+          <Btn onClick={()=>runLeadFinder()} disabled={!!busy} sm color={T.cyan}><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find Leads"}</Btn>
           <Btn onClick={runAutopilot} disabled={!!busy} sm color={T.amber}><SVG d={IC.bolt} size={12} />{busy==="auto"?"Working…":"Run AI Team"}</Btn>
           <button onClick={()=>setTab("approvals")} className="relative" style={{ color:T.muted }}><SVG d={IC.inbox} size={18} />{queue.length>0 && <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-xs flex items-center justify-center font-bold" style={{ background:T.orange, color:"white", fontSize:8 }}>{queue.length}</span>}</button>
         </div>
@@ -486,7 +650,7 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
               <div className="rounded-2xl p-5 flex flex-col md:flex-row md:items-center gap-4" style={{ background:T.card, border:`1px solid ${T.cyan}30` }}>
                 <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:T.cyan+"18" }}><SVG d={IC.search} size={20} style={{ color:T.cyan }} /></div>
                 <div className="flex-1"><div className="text-sm font-bold text-white">AI Lead Finder</div><p className="text-xs mt-0.5" style={{ color:T.muted }}>Searches the web for buyer & supplier candidates matching your focus: <span style={{ color:T.cyan }}>{p.focus || "Broad bulk trade"}</span></p></div>
-                <Btn onClick={runLeadFinder} disabled={!!busy} color={T.cyan} sm><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find Leads"}</Btn>
+                <Btn onClick={()=>runLeadFinder()} disabled={!!busy} color={T.cyan} sm><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find Leads"}</Btn>
               </div>
               <div className="rounded-2xl p-5 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${T.amber}30` }}>
                 <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.ceo} size={15} style={{ color:T.amber }} /><span className="text-sm font-semibold text-white">CEO AI — Briefing</span></div><Btn onClick={runBriefing} disabled={!!busy} color={T.amber} sm><SVG d={IC.refresh} size={12} />{busy==="brief"?"…":"Refresh"}</Btn></div>
@@ -538,13 +702,23 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
             <div className="flex flex-col gap-5 max-w-3xl mx-auto">
               <div className="flex items-center justify-between flex-wrap gap-3">
                 <div><h1 className="text-2xl font-black text-white">Lead Approvals</h1><p className="text-sm mt-1" style={{ color:T.muted }}>Candidates the AI found. Approve to add them and let the AI draft outreach, or decline.</p></div>
-                <Btn onClick={runLeadFinder} disabled={!!busy} color={T.cyan} sm><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find More"}</Btn>
+                <Btn onClick={()=>runLeadFinder()} disabled={!!busy} color={T.cyan} sm><SVG d={IC.search} size={12} />{busy==="leads"?"Searching…":"Find More"}</Btn>
+              </div>
+              <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${T.cyan}30` }}>
+                <div className="text-xs font-bold uppercase tracking-widest" style={{ color:T.cyan }}>Search anything, right now</div>
+                <p className="text-xs leading-relaxed" style={{ color:T.muted }}>Type any product or market — "solar panels", "building materials", "grass" — no need to touch Settings. Leave blank to use your saved default focus.</p>
+                <div className="flex gap-2">
+                  <input value={quickFocus} onChange={e=>setQuickFocus(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!busy&&runLeadFinder(quickFocus)}
+                    placeholder={p.focus || "e.g. solar panels, South Africa"}
+                    className="flex-1 text-sm rounded-xl px-3 py-2.5 outline-none placeholder-slate-600" style={{ background:T.surface, border:`1px solid ${T.border}`, color:T.text }} />
+                  <Btn onClick={()=>runLeadFinder(quickFocus)} disabled={!!busy} color={T.cyan} sm>{busy==="leads"?"Searching…":"Search Now"}</Btn>
+                </div>
               </div>
               <div className="p-4 rounded-2xl flex items-start gap-3" style={{ background:T.card, border:`1px solid ${T.cyan}30` }}>
                 <SVG d={IC.search} size={14} style={{ color:T.cyan, flexShrink:0, marginTop:2 }} />
                 <div className="text-xs leading-relaxed" style={{ color:T.muted }}><span className="font-semibold" style={{ color:T.cyan }}>These are researched candidates, not confirmed buyers. </span>The AI found companies that fit your focus and pulled public details. Verify before relying on them — your approval is the safeguard.</div>
               </div>
-              {pendingLeads.length===0 ? <Empty icon={IC.search} title="No leads waiting" sub="Run the Lead Finder to discover buyer & supplier candidates." action="Find Leads" onAction={runLeadFinder} />
+              {pendingLeads.length===0 ? <Empty icon={IC.search} title="No leads waiting" sub="Run the Lead Finder to discover buyer & supplier candidates." action="Find Leads" onAction={()=>runLeadFinder()} />
                 : <div className="flex flex-col gap-3">{pendingLeads.map(lead => (
                     <div key={lead.id} className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${T.cyan}33` }}>
                       <div className="flex items-start justify-between gap-3">
@@ -639,24 +813,40 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
               <div><h1 className="text-2xl font-black text-white">Contacts</h1><p className="text-sm mt-1" style={{ color:T.muted }}>Buyers and suppliers you've approved from AI leads.</p></div>
               {buyers.length===0 && suppliers.length===0 ? <Empty icon={IC.buyers} title="No contacts yet" sub="Approve AI leads to build your network — you don't add them by hand." action="Review Leads" onAction={()=>setTab("leads")} />
                 : <>
-                    {buyers.length>0 && <div><div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color:T.muted }}>Buyers</div><div className="grid md:grid-cols-2 gap-4">{buyers.map(b => (
+                    {buyers.length>0 && <div><div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color:T.muted }}>Buyers</div><div className="grid md:grid-cols-2 gap-4">{buyers.map(b => {
+                      const days = daysSinceContact(b);
+                      const health = contactHealthBadge(days);
+                      return (
                       <div key={b.id} className="rounded-2xl p-4 flex flex-col gap-2" style={{ background:T.card, border:`1px solid ${T.border}` }}>
                         <div className="flex items-start justify-between"><div><div className="text-sm font-bold text-white">{b.name}</div><div className="text-xs mt-0.5" style={{ color:T.muted }}>{b.country} · {b.industry}</div></div><StatusPill status={b.status} /></div>
+                        <div className="flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background:health.color }} /><span className="text-xs" style={{ color:health.color }}>{health.label}</span></div>
                         {b.email && <div className="text-xs flex items-center gap-1.5" style={{ color:T.dim }}><SVG d={IC.mail} size={11} />{b.email}</div>}
                         {b.phone && <div className="text-xs flex items-center gap-1.5" style={{ color:T.dim }}><SVG d={IC.msg} size={11} />{b.phone}</div>}
                         {b.notes && <p className="text-xs leading-relaxed" style={{ color:T.muted }}>{b.notes}</p>}
-                        <button onClick={()=>delBuyer(b.id)} className="self-end p-1.5 rounded-lg" style={{ background:T.red+"15", color:T.red }}><SVG d={IC.trash} size={12} /></button>
+                        <div className="flex gap-2">
+                          <button onClick={()=>draftCheckIn(b,"buyer")} className="flex-1 text-xs py-1.5 rounded-lg font-medium" style={{ background:T.blue+"18", color:T.blue, border:`1px solid ${T.blue}33` }}>💬 Send Check-in</button>
+                          <button onClick={()=>delBuyer(b.id)} className="p-1.5 rounded-lg" style={{ background:T.red+"15", color:T.red }}><SVG d={IC.trash} size={12} /></button>
+                        </div>
                       </div>
-                    ))}</div></div>}
-                    {suppliers.length>0 && <div><div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color:T.muted }}>Suppliers</div><div className="grid md:grid-cols-2 gap-4">{suppliers.map(s => (
+                      );
+                    })}</div></div>}
+                    {suppliers.length>0 && <div><div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color:T.muted }}>Suppliers</div><div className="grid md:grid-cols-2 gap-4">{suppliers.map(s => {
+                      const days = daysSinceContact(s);
+                      const health = contactHealthBadge(days);
+                      return (
                       <div key={s.id} className="rounded-2xl p-4 flex flex-col gap-2" style={{ background:T.card, border:`1px solid ${T.border}` }}>
                         <div className="flex items-start justify-between"><div><div className="text-sm font-bold text-white">{s.name}</div><div className="text-xs mt-0.5" style={{ color:T.muted }}>{s.country} · {s.product}</div></div><Pill label={s.certified?"Certified":"Unverified"} color={s.certified?T.green:T.amber} /></div>
+                        <div className="flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background:health.color }} /><span className="text-xs" style={{ color:health.color }}>{health.label}</span></div>
                         {s.email && <div className="text-xs flex items-center gap-1.5" style={{ color:T.dim }}><SVG d={IC.mail} size={11} />{s.email}</div>}
                         {s.phone && <div className="text-xs flex items-center gap-1.5" style={{ color:T.dim }}><SVG d={IC.msg} size={11} />{s.phone}</div>}
                         {s.notes && <p className="text-xs leading-relaxed" style={{ color:T.muted }}>{s.notes}</p>}
-                        <button onClick={()=>delSupplier(s.id)} className="self-end p-1.5 rounded-lg" style={{ background:T.red+"15", color:T.red }}><SVG d={IC.trash} size={12} /></button>
+                        <div className="flex gap-2">
+                          <button onClick={()=>draftCheckIn(s,"supplier")} className="flex-1 text-xs py-1.5 rounded-lg font-medium" style={{ background:T.blue+"18", color:T.blue, border:`1px solid ${T.blue}33` }}>💬 Send Check-in</button>
+                          <button onClick={()=>delSupplier(s.id)} className="p-1.5 rounded-lg" style={{ background:T.red+"15", color:T.red }}><SVG d={IC.trash} size={12} /></button>
+                        </div>
                       </div>
-                    ))}</div></div>}
+                      );
+                    })}</div></div>}
                   </>}
             </div>
           )}
@@ -750,10 +940,16 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
           {/* SETTINGS */}
           {tab==="settings" && <SettingsTab p={p} setP={setP} saveProfile={saveProfile} emailReady={emailReady} smsReady={smsReady} />}
 
+          <Footer onOpenLegal={setLegalDoc} />
         </div>
       </div>
 
       {/* MODALS */}
+      {legalDoc && (
+        <Modal title={legalDoc==="terms"?"Terms and Conditions":legalDoc==="privacy"?"Privacy Policy":"Disclaimer"} onClose={()=>setLegalDoc(null)}>
+          <pre className="text-xs leading-relaxed whitespace-pre-wrap" style={{ color:T.muted, fontFamily:"inherit" }}>{LEGAL_TEXT[legalDoc]}</pre>
+        </Modal>
+      )}
       {chatAgent && <AgentChat agent={chatAgent} ctx={{ focus:p.focus, buyers:buyers.length, suppliers:suppliers.length, opps:opps.length, totalPipeline, bookedEarnings }} onClose={()=>setChatAgent(null)} />}
       {viewDoc && (
         <Modal title={viewDoc.title||viewDoc.type} onClose={()=>setViewDoc(null)} wide>
