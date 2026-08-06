@@ -4,6 +4,11 @@ import { T } from "./lib/ui.jsx";
 import Auth from "./screens/Auth.jsx";
 import Onboarding from "./screens/Onboarding.jsx";
 import MainApp from "./screens/MainApp.jsx";
+import CompanyProfile from "./screens/CompanyProfile.jsx";
+
+// Paths that show the public company verification page — no login needed.
+// Link any of these from your email signature, WhatsApp, etc.
+const PUBLIC_PATHS = ["/about", "/profile", "/company", "/verify"];
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -49,6 +54,12 @@ export default function App() {
   };
 
   const logout = async () => { await supabase.auth.signOut(); };
+
+  // PUBLIC ROUTE — checked after hooks (Rules of Hooks) but before any
+  // loading/auth branching. No Supabase session required to view this.
+  if (typeof window !== "undefined" && PUBLIC_PATHS.includes(window.location.pathname)) {
+    return <CompanyProfile />;
+  }
 
   if (loading) {
     return (
