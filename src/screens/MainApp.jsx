@@ -47,6 +47,24 @@ const readErrorMessage = async (res) => {
 // ── COMPANY / LEGAL / FOOTER ──
 const COMPANY = { name: "BLACK GOLD NEXUS (PTY) LTD", reg: "2026/565924/07", email: "blackgoldnexus@gmail.com" };
 
+// Public verification page URL. Override in your .env with
+// VITE_COMPANY_PROFILE_URL once the /company route is live on your domain.
+const COMPANY_PROFILE_URL = import.meta.env.VITE_COMPANY_PROFILE_URL || "https://trade-broker-app.vercel.app/company";
+
+// Appends a link to the public company verification page to an outbound
+// message body. Idempotent — checks whether the link is already present
+// before appending, so calling this twice (e.g. on a regenerated message)
+// never produces a duplicate. SMS gets a short line (billed per segment);
+// email gets a slightly fuller signature-style line.
+function appendVerifyLine(body, channel) {
+  const safeBody = body || "";
+  if (safeBody.includes(COMPANY_PROFILE_URL)) return safeBody;
+  const line = channel === "sms"
+    ? `\n\nVerify us: ${COMPANY_PROFILE_URL}`
+    : `\n\n—\nVerify our company registration (CIPC ${COMPANY.reg}): ${COMPANY_PROFILE_URL}`;
+  return safeBody + line;
+}
+
 const LEGAL_TEXT = {
   terms: `TERMS AND CONDITIONS — TEMPLATE, REVIEW WITH A QUALIFIED ATTORNEY BEFORE PUBLISHING
 
@@ -114,6 +132,7 @@ function Footer({ onOpenLegal }) {
           <div className="flex flex-col gap-1.5 text-xs" style={{ color: T.dim }}>
             <span>Support: {COMPANY.email}</span>
             <span>CIPC: www.cipc.co.za · 0861 002 472</span>
+            <a href={COMPANY_PROFILE_URL} target="_blank" rel="noreferrer" className="text-left underline" style={{ color: T.dim }}>Company Verification Profile ↗</a>
           </div>
         </div>
         <div>
@@ -286,7 +305,7 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
         user_id: uid, agent: "Outreach AI", channel,
         recipient_type: lead.kind, recipient_name: lead.name,
         to_addr: channel==="sms" ? (lead.phone||"") : (lead.email||""),
-        subject: r.subject || "Introduction", body: r.body || "", rationale: lead.why_fit, status: "pending",
+        subject: r.subject || "Introduction", body: appendVerifyLine(r.body || "", channel), rationale: lead.why_fit, status: "pending",
       };
       const { data: q } = await supabase.from("queue").insert(row).select().single();
       if (q) setQueue(prev => [q, ...prev]);
@@ -314,7 +333,7 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
       const row = {
         user_id: uid, agent: "Relationship AI", channel,
         recipient_type: kind, recipient_name: contact.name,
-        to_addr, subject: r.subject || "Checking in", body: r.body || "", rationale: "Relationship check-in", status: "pending",
+        to_addr, subject: r.subject || "Checking in", body: appendVerifyLine(r.body || "", channel), rationale: "Relationship check-in", status: "pending",
       };
       const { data: q } = await supabase.from("queue").insert(row).select().single();
       if (q) setQueue(prev => [q, ...prev]);
@@ -488,8 +507,9 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
     try {
       const data = await callClaude([{ role:"user", content:`Rewrite this ${item.channel} to ${item.recipient_name} with a fresh angle, under 130 words, sign off "${p.signoff||"Trade Operations"}". Return JSON: { "subject":"", "body":"" }` }], "You are Outreach AI. Return only JSON.");
       const r = parseJSON(data.text);
-      await supabase.from("queue").update({ subject:r.subject||item.subject, body:r.body||item.body }).eq("id", item.id);
-      setQueue(prev => prev.map(q => q.id===item.id ? {...q, subject:r.subject||q.subject, body:r.body||q.body} : q));
+      const newBody = appendVerifyLine(r.body || item.body, item.channel);
+      await supabase.from("queue").update({ subject:r.subject||item.subject, body:newBody }).eq("id", item.id);
+      setQueue(prev => prev.map(q => q.id===item.id ? {...q, subject:r.subject||q.subject, body:newBody} : q));
       notify("Regenerated ✓");
     } catch { notify("Regen failed", "error"); }
   };
