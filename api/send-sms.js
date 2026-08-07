@@ -1,85 +1,158 @@
-// ── SERVERLESS RELAY: SMS (Vercel) ──
+// ── SERVERLESS RELAY: SMS (Vercel App Router) ──
+// Path: app/api/send-sms/route.js
 // Called by the frontend as POST /api/send-sms.
-// Keeps the user's Twilio credentials server-side for this single request
-// rather than exposing them to the browser (Twilio blocks direct browser
-// calls via CORS and requires Basic Auth, which must never sit in client JS).
-// No env var needed for Twilio credentials — each user supplies their own
-// from Settings → Integrations, passed in the request body.
-//
-// SAFETY NET: every outgoing SMS is guaranteed to carry a link to the public
-// company verification page. The frontend already appends a short version at
-// draft time (so the approver sees the exact final text before approving),
-// but this server-side check is idempotent — it only appends if the link
-// isn't already present — so it can never duplicate. Kept short on purpose:
-// SMS is billed per 160-char segment, so this uses "Verify us:" rather than
-// the longer email-style line.
+// Keeps Twilio credentials server-side for this request and avoids CORS blocks.
 
-const COMPANY_PROFILE_URL = process.env.COMPANY_PROFILE_URL || "https://trade-broker-app.vercel.app/company";
+import { NextResponse } from "next/server";
 
-function ensureVerifyLink(body) {
-  const safeBody = typeof body === "string" ? body : "";
-  if (safeBody.includes(COMPANY_PROFILE_URL)) return safeBody;
-  return `${safeBody}\n\nVerify us: ${COMPANY_PROFILE_URL}`;
+// CORS helper supporting production, local development, and Vercel preview URLs
+function getCorsHeaders(request) {
+  const origin = request.headers.get("origin") || "";
+
+  const allowedOrigins = [
+    "https://e-broker.vercel.app",
+    "https://trade-broker-app.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+  ];
+
+  const isAllowed =
+    allowedOrigins.includes(origin) ||
+    /^https:\/\/[a-zA-Z0-9-]+-.*\.vercel\.app$/.test(origin) ||
+    origin.endsWith(".vercel.app");
+
+  return {
+    "Access-Control-Allow-Origin": isAllowed ? origin : allowedOrigins[0],
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
 }
 
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+// Handle CORS Preflight (OPTIONS)
+export async function OPTIONS(request) {
+  return new NextResponse(null, {
+    status: 200,
+    headers: getCorsHeaders(request),
+  });
+}
 
-  const { to, body, twilioSid, twilioToken, twilioFrom } = req.body || {};
-
-  // ── Defensive validation ──
-  if (!twilioSid || typeof twilioSid !== "string" || !twilioSid.trim()) {
-    return res.status(400).json({ error: "Missing Twilio Account SID. Add it in Settings → Integrations." });
-  }
-  if (!twilioToken || typeof twilioToken !== "string" || !twilioToken.trim()) {
-    return res.status(400).json({ error: "Missing Twilio Auth Token. Add it in Settings → Integrations." });
-  }
-  if (!twilioFrom || typeof twilioFrom !== "string" || !twilioFrom.trim()) {
-    return res.status(400).json({ error: "Missing Twilio From Number. Add it in Settings → Integrations." });
-  }
-  if (!to || typeof to !== "string" || !to.trim()) {
-    return res.status(400).json({ error: "Missing recipient phone number." });
-  }
-  const phoneLike = /^\+?[1-9]\d{7,14}$/;
-  if (!phoneLike.test(to.trim().replace(/[\s-()]/g, ""))) {
-    return res.status(400).json({ error: `"${to}" doesn't look like a valid phone number. Use E.164 format, e.g. +14155551234.` });
-  }
+// Main POST Handler
+export async function POST(request) {
+  const corsHeaders = getCorsHeaders(request);
 
   try {
-    const finalBody = ensureVerifyLink(body || "");
+    const payload = await request.json().catch(() => null);
 
-    const form = new URLSearchParams({
-      To: to.trim(),
-      From: twilioFrom.trim(),
-      Body: finalBody,
-    });
+    if (!payload) {
+      return NextResponse.json(
+        { error: "Invalid or empty JSON body provided." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
 
-    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${twilioSid.trim()}/Messages.json`, {
+    const { to, body, accountSid, authToken, fromNumber } = payload;
+
+    // ── Defensive Validation ──
+    if (!accountSid || typeof accountSid !== "string" || !accountSid.trim()) {
+      return NextResponse.json(
+        { error: "Missing Twilio Account SID. Add it in Settings → Integrations." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (!authToken || typeof authToken !== "string" || !authToken.trim()) {
+      return NextResponse.json(
+        { error: "Missing Twilio Auth Token. Add it in Settings → Integrations." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (!fromNumber || typeof fromNumber !== "string" || !fromNumber.trim()) {
+      return NextResponse.json(
+        { error: "Missing Sender Phone Number (From). Add it in Settings → Integrations." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (!to || typeof to !== "string" || !to.trim()) {
+      return NextResponse.json(
+        { error: "Missing recipient phone number (To)." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (!body || typeof body !== "string" || !body.trim()) {
+      return NextResponse.json(
+        { error: "Missing message content body." },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // ── Prepare Twilio API Request ──
+    const cleanSid = accountSid.trim();
+    const cleanToken = authToken.trim();
+    const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${cleanSid}/Messages.json`;
+
+    // Twilio REST API expects x-www-form-urlencoded
+    const formData = new URLSearchParams();
+    formData.append("To", to.trim());
+    formData.append("From", fromNumber.trim());
+    formData.append("Body", body.trim());
+
+    // Basic Auth Header (AccountSid : AuthToken base64 encoded)
+    const authHeader =
+      "Basic " + Buffer.from(`${cleanSid}:${cleanToken}`).toString("base64");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+    const twilioResponse = await fetch(twilioUrl, {
       method: "POST",
       headers: {
-        Authorization: "Basic " + Buffer.from(`${twilioSid.trim()}:${twilioToken.trim()}`).toString("base64"),
+        Authorization: authHeader,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: form.toString(),
+      signal: controller.signal,
+      body: formData.toString(),
     });
 
-    let data = {};
+    clearTimeout(timeout);
+
+    // Read stream once as text to prevent double-read errors
+    const responseText = await twilioResponse.text().catch(() => "");
+    let twilioData = {};
+
     try {
-      data = await r.json();
+      twilioData = responseText ? JSON.parse(responseText) : {};
     } catch {
-      data = { raw: await r.text().catch(() => "") };
+      twilioData = { raw: responseText };
     }
 
-    if (!r.ok) {
-      return res.status(r.status).json({ error: data?.message || data?.error || "Twilio rejected the request", details: data });
+    if (!twilioResponse.ok) {
+      const errorMessage =
+        twilioData?.message ||
+        twilioData?.error_message ||
+        "Twilio rejected the SMS. Check phone number formatting (e.g., +27821234567) or credentials.";
+
+      return NextResponse.json(
+        { error: errorMessage, details: twilioData },
+        { status: twilioResponse.status, headers: corsHeaders }
+      );
     }
 
-    return res.status(200).json({ ok: true, data });
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
+    return NextResponse.json(
+      { ok: true, sid: twilioData.sid, status: twilioData.status, data: twilioData },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (err) {
+    const isTimeout = err.name === "AbortError";
+    return NextResponse.json(
+      {
+        error: isTimeout
+          ? "Request timed out waiting for Twilio API response."
+          : String(err?.message || err),
+      },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
