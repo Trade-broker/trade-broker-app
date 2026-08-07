@@ -4,6 +4,7 @@ export async function callClaude(messages, system = "", { tools, maxTokens } = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, system, tools, max_tokens: maxTokens }),
   });
+  
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "AI request failed");
   return data;
@@ -11,11 +12,32 @@ export async function callClaude(messages, system = "", { tools, maxTokens } = {
 
 export function parseJSON(txt) {
   if (!txt) throw new Error("Empty response");
+  
+  // Strip Markdown code block markers
   const clean = txt.replace(/```json|```/g, "").trim();
-  const s = clean.indexOf("{");
-  const sa = clean.indexOf("[");
-  const start = sa !== -1 && (sa < s || s === -1) ? sa : s;
-  return JSON.parse(start > 0 ? clean.slice(start) : clean);
+  
+  // Locate first occurrence of JSON object or array opening
+  const objStart = clean.indexOf("{");
+  const arrStart = clean.indexOf("[");
+  
+  let start = -1;
+  if (objStart !== -1 && arrStart !== -1) {
+    start = Math.min(objStart, arrStart);
+  } else {
+    start = objStart !== -1 ? objStart : arrStart;
+  }
+
+  if (start === -1) {
+    throw new Error("No valid JSON structure found in response.");
+  }
+
+  // Determine last closing character to avoid trailing text issues
+  const lastObj = clean.lastIndexOf("}");
+  const lastArr = clean.lastIndexOf("]");
+  const end = Math.max(lastObj, lastArr);
+
+  const jsonSubstring = end > start ? clean.slice(start, end + 1) : clean.slice(start);
+  return JSON.parse(jsonSubstring);
 }
 
 const WEB_SEARCH = [{ type: "web_search_20250305", name: "web_search" }];
@@ -50,6 +72,10 @@ For each, return real, verifiable companies. Then respond with ONLY this JSON (n
 }`;
 
   const data = await callClaude([{ role: "user", content: prompt }], sys, { tools: WEB_SEARCH, maxTokens: 2500 });
-  const parsed = parseJSON(data.text);
+  
+  // Extract text from standard string return or SDK block structures
+  const responseText = typeof data === "string" ? data : (data.text || data.content?.[0]?.text || "");
+  const parsed = parseJSON(responseText);
+  
   return parsed.leads || [];
 }
