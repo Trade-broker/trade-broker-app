@@ -3,8 +3,24 @@
 // Keeps the user's Twilio credentials server-side for this single request
 // rather than exposing them to the browser (Twilio blocks direct browser
 // calls via CORS and requires Basic Auth, which must never sit in client JS).
-// No env var needed here — each user supplies their own Twilio credentials
-// from Settings → Integrations, which the frontend passes in the request body.
+// No env var needed for Twilio credentials — each user supplies their own
+// from Settings → Integrations, passed in the request body.
+//
+// SAFETY NET: every outgoing SMS is guaranteed to carry a link to the public
+// company verification page. The frontend already appends a short version at
+// draft time (so the approver sees the exact final text before approving),
+// but this server-side check is idempotent — it only appends if the link
+// isn't already present — so it can never duplicate. Kept short on purpose:
+// SMS is billed per 160-char segment, so this uses "Verify us:" rather than
+// the longer email-style line.
+
+const COMPANY_PROFILE_URL = process.env.COMPANY_PROFILE_URL || "https://trade-broker-app.vercel.app/company";
+
+function ensureVerifyLink(body) {
+  const safeBody = typeof body === "string" ? body : "";
+  if (safeBody.includes(COMPANY_PROFILE_URL)) return safeBody;
+  return `${safeBody}\n\nVerify us: ${COMPANY_PROFILE_URL}`;
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -28,18 +44,18 @@ export default async function handler(req, res) {
   if (!to || typeof to !== "string" || !to.trim()) {
     return res.status(400).json({ error: "Missing recipient phone number." });
   }
-  // Basic E.164-ish sanity check (+ then 8-15 digits) — not exhaustive,
-  // just enough to catch obvious mistakes before calling out to Twilio
   const phoneLike = /^\+?[1-9]\d{7,14}$/;
   if (!phoneLike.test(to.trim().replace(/[\s-()]/g, ""))) {
     return res.status(400).json({ error: `"${to}" doesn't look like a valid phone number. Use E.164 format, e.g. +14155551234.` });
   }
 
   try {
+    const finalBody = ensureVerifyLink(body || "");
+
     const form = new URLSearchParams({
       To: to.trim(),
       From: twilioFrom.trim(),
-      Body: body || "",
+      Body: finalBody,
     });
 
     const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${twilioSid.trim()}/Messages.json`, {
@@ -51,7 +67,6 @@ export default async function handler(req, res) {
       body: form.toString(),
     });
 
-    // Twilio returns JSON; fall back gracefully if it doesn't
     let data = {};
     try {
       data = await r.json();
