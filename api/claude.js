@@ -1,6 +1,28 @@
 // ── VERCEL SERVERLESS FUNCTION: ANTHROPIC CLAUDE RELAY ──
 // Path: api/claude.js
 
+// Pull unique {url, title} source links out of any web_search_tool_result
+// blocks in the response. Needed by lib/ai.js's findLeads() to mark leads as
+// "Web-verified" vs "Unverified" — without this, every lead looks unverified
+// even when a real web search happened.
+function extractSources(data) {
+  if (!data || !Array.isArray(data.content)) return [];
+  const found = [];
+  for (const block of data.content) {
+    if (block && block.type === "web_search_tool_result" && Array.isArray(block.content)) {
+      for (const item of block.content) {
+        if (item && item.url) found.push({ url: item.url, title: item.title || item.url });
+      }
+    }
+  }
+  const seen = new Set();
+  return found.filter((s) => {
+    if (seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  });
+}
+
 export default async function handler(req, res) {
   // ── CORS Headers ──
   const origin = req.headers.origin || "";
@@ -23,7 +45,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const { messages, system, tools, tool_choice, max_tokens, model, apiKey } = req.body || {};
+  const { messages, system, tools, tool_choice, max_tokens, model, apiKey, enableWebSearch } = req.body || {};
 
   const key = apiKey?.trim() || process.env.ANTHROPIC_API_KEY;
 
@@ -47,9 +69,17 @@ export default async function handler(req, res) {
     if (system && typeof system === "string" && system.trim()) {
       bodyPayload.system = system.trim();
     }
+
+    // Explicit tools array (new contract) takes priority. If none was
+    // provided but the caller set the legacy enableWebSearch flag (used by
+    // lib/ai.js's findLeads), auto-attach the hosted web_search tool so
+    // lead research keeps working without every call site needing to know
+    // the exact tool schema.
     if (Array.isArray(tools) && tools.length > 0) {
       bodyPayload.tools = tools;
       if (tool_choice) bodyPayload.tool_choice = tool_choice;
+    } else if (enableWebSearch) {
+      bodyPayload.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
     }
 
     const controller = new AbortController();
@@ -90,7 +120,9 @@ export default async function handler(req, res) {
       .filter(Boolean)
       .join("\n");
 
-    return res.status(200).json({ text, content: data.content, usage: data.usage });
+    const sources = extractSources(data);
+
+    return res.status(200).json({ text, sources, content: data.content, usage: data.usage });
   } catch (e) {
     const isTimeout = e.name === "AbortError";
     return res.status(500).json({
