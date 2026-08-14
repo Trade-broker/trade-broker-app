@@ -12,6 +12,33 @@ function ensureVerifyLink(body) {
   return `${safeBody}\n\nVerify us: ${COMPANY_PROFILE_URL}`;
 }
 
+// Translates common Twilio SMS error codes into plain-language messages the
+// broker can actually act on, instead of raw Twilio API text. Falls back to
+// Twilio's own message for anything not in this list, so nothing is ever
+// hidden — just made clearer where possible.
+// Reference: https://www.twilio.com/docs/api/errors
+const TWILIO_ERROR_HINTS = {
+  21211: "That phone number isn't formatted correctly. Use E.164 format, e.g. +27821234567.",
+  21408: "Your Twilio account isn't permitted to send SMS to that country yet. Check Console → Messaging → Settings → Geographic Permissions and enable it there.",
+  21606: "The 'From' number isn't a valid, SMS-capable number on your Twilio account. Check Settings → Integrations → From Number.",
+  21610: "That recipient has previously opted out (replied STOP) and can't be messaged again unless they opt back in.",
+  21612: "This number can't send to that country yet. In Twilio Console, check that your regulatory bundle for that country is actually assigned to this sending number (Phone Numbers → Manage → Active Numbers → your number → Regulatory Compliance) — having an Accepted bundle isn't enough, it must be linked to the number itself. For US toll-free numbers, also confirm Toll-Free Verification is complete under Messaging → Senders.",
+  21614: "That 'To' number isn't a valid mobile number capable of receiving SMS.",
+  30003: "The recipient's phone is unreachable (may be switched off or out of service).",
+  30004: "The recipient has blocked messages from this number.",
+  30005: "That number is unknown or no longer in service.",
+  30006: "The recipient's carrier flagged this as unable to be delivered to a landline or unsupported number.",
+  30007: "This message was flagged and filtered as spam by the recipient's carrier.",
+};
+
+function friendlyTwilioError(twilioData, fallback) {
+  const code = twilioData?.code;
+  if (code && TWILIO_ERROR_HINTS[code]) {
+    return `${TWILIO_ERROR_HINTS[code]} (Twilio error ${code})`;
+  }
+  return fallback;
+}
+
 export default async function handler(req, res) {
   // ── CORS Headers ──
   const origin = req.headers.origin || "";
@@ -104,15 +131,29 @@ export default async function handler(req, res) {
     }
 
     if (!twilioResponse.ok) {
-      const errorMessage =
+      const rawMessage =
         twilioData?.message ||
         twilioData?.error_message ||
         "Twilio rejected the SMS request. Check phone number format (e.g., +27821234567).";
 
+      const errorMessage = friendlyTwilioError(twilioData, rawMessage);
+
       return res.status(twilioResponse.status).json({ error: errorMessage, details: twilioData });
     }
 
-    return res.status(200).json({ ok: true, sid: twilioData.sid, status: twilioData.status, data: twilioData });
+    // A 201/queued response doesn't guarantee delivery — Twilio can still
+    // fail the message asynchronously afterward (this is exactly what
+    // happened in the UK toll-free case: it queued successfully, then
+    // failed ~1.5s later with error 21612). We can't await that here without
+    // polling, so we surface status/sid so the frontend can show "queued"
+    // rather than implying final delivery, and the person can check the
+    // Twilio message log if something looks off downstream.
+    return res.status(200).json({
+      ok: true,
+      sid: twilioData.sid,
+      status: twilioData.status,
+      data: twilioData,
+    });
   } catch (err) {
     const isTimeout = err.name === "AbortError";
     return res.status(500).json({
