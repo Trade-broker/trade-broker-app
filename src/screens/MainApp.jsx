@@ -389,24 +389,38 @@ export default function MainApp({ session, profile, onLogout, refreshProfile }) 
     await logFeed("⚡ AI team cycle started…", T.amber);
     try {
       await runLeadFinderInline();
-      // propose opportunities from approved contacts
-      if (buyers.length || suppliers.length) {
-        const sys = "You are CEO AI. Propose concrete trade opportunities from the broker's contacts. Return only JSON.";
-        const prompt = `Buyers: ${JSON.stringify(buyers.slice(0,15).map(b=>({name:b.name,country:b.country,industry:b.industry})))}
-Suppliers: ${JSON.stringify(suppliers.slice(0,15).map(s=>({name:s.name,country:s.country,product:s.product})))}
+      // propose opportunities — Deal Maker AI now picks REAL buyer+supplier
+      // pairs by ID, not just prose. Each opportunity is a genuine link
+      // between two contacts, not a text description with no connection to
+      // either party.
+      if (buyers.length && suppliers.length) {
+        const buyerList = buyers.slice(0,15).map(b=>({id:b.id,name:b.name,country:b.country,industry:b.industry}));
+        const supplierList = suppliers.slice(0,15).map(s=>({id:s.id,name:s.name,country:s.country,product:s.product}));
+        const sys = "You are Deal Maker AI. Match a specific buyer to a specific supplier from the provided lists and propose a concrete trade opportunity. You MUST use the exact 'id' values given — never invent an id. Return only JSON.";
+        const prompt = `Buyers: ${JSON.stringify(buyerList)}
+Suppliers: ${JSON.stringify(supplierList)}
 Focus: ${p.focus || "bulk trade"}.
-Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"Trade Deal", "value":0, "commission":0, "confidence":70, "risk":"Medium", "rationale":"" }] }`;
+Propose up to 3 opportunities, each pairing ONE buyer id with ONE supplier id from the lists above. JSON: { "opportunities": [{ "buyer_id":"", "supplier_id":"", "title":"", "type":"Trade Deal", "value":0, "commission":0, "confidence":70, "risk":"Medium", "rationale":"" }] }`;
         const data = await callClaude([{ role:"user", content: prompt }], sys);
         const parsed = parseJSON(data.text);
-        const rows = (parsed.opportunities||[]).map(o => ({
-          user_id: uid, title:o.title, type:o.type||"Trade Deal", status:"New",
-          value:Number(o.value)||0, commission:Number(o.commission)||0,
-          confidence:Number(o.confidence)||70, risk:o.risk||"Medium", effort:"Medium", notes:o.rationale||"",
-        }));
+        const buyerIds = new Set(buyerList.map(b=>b.id));
+        const supplierIds = new Set(supplierList.map(s=>s.id));
+        // Defensive: only accept pairs where BOTH ids genuinely exist in the
+        // lists we sent — protects against a hallucinated id ever reaching
+        // the database and silently producing an unlinked "deal".
+        const rows = (parsed.opportunities||[])
+          .filter(o => buyerIds.has(o.buyer_id) && supplierIds.has(o.supplier_id))
+          .map(o => ({
+            user_id: uid, title:o.title, type:o.type||"Trade Deal", status:"New",
+            value:Number(o.value)||0, commission:Number(o.commission)||0,
+            confidence:Number(o.confidence)||70, risk:o.risk||"Medium", effort:"Medium", notes:o.rationale||"",
+            buyer_id:o.buyer_id, supplier_id:o.supplier_id,
+          }));
         if (rows.length) {
           const { data: ins } = await supabase.from("opportunities").insert(rows).select();
           setOpps(prev => [...(ins||[]), ...prev]);
-          await logFeed(`💡 Deal Maker proposed ${rows.length} opportunities`, T.purple);
+          await logFeed(`💡 Deal Maker matched ${rows.length} real buyer↔supplier pair(s)`, T.purple);
+          for (const op of (ins||[])) { draftDealContracts(op); }
         }
       }
       await logFeed("✅ Cycle complete", T.green);
@@ -496,7 +510,7 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
     // sometimes all the way to "Won", auto-booking a fake commission and
     // generating a real invoice from nothing. Now it only runs for genuine
     // deal outreach, never for check-ins.
-    if (item.agent === "Outreach AI") advanceDeal();
+    if (item.agent === "Outreach AI" && item.opportunity_id) advanceDeal(item.opportunity_id);
   };
   const declineMsg = async (item) => {
     await supabase.from("queue").delete().eq("id", item.id);
@@ -515,8 +529,8 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
   };
 
   const STAGE_NEXT = { New:"Evaluating", Evaluating:"Active", Active:"Closing", Closing:"Won" };
-  const advanceDeal = async () => {
-    const target = opps.find(o => !["Won","Lost"].includes(o.status));
+  const advanceDeal = async (opportunityId) => {
+    const target = opps.find(o => o.id === opportunityId && !["Won","Lost"].includes(o.status));
     if (!target) return;
     const ns = STAGE_NEXT[target.status] || target.status;
     await supabase.from("opportunities").update({ status: ns }).eq("id", target.id);
@@ -536,6 +550,87 @@ Propose up to 3 opportunities. JSON: { "opportunities": [{ "title":"", "type":"T
     await supabase.from("opportunities").update({ status:"Won" }).eq("id", op.id);
     setOpps(prev => prev.map(o => o.id===op.id ? {...o, status:"Won"} : o));
     if (op.commission > 0) { await bookEarning(op); notify(`Commission booked ✓`); }
+  };
+
+  // ── DEAL CONTRACTS: draft + send to BOTH the buyer and supplier ──
+  // Called automatically right after Deal Maker AI links a real buyer to a
+  // real supplier. Drafts one Sales/Commission Contract with Claude, saves
+  // it as a document, then queues TWO separate outreach messages — one to
+  // the buyer, one to the supplier — each referencing the contract and
+  // asking them to review and sign. Nothing sends without your approval,
+  // same as every other message in this app.
+  const draftDealContracts = async (op) => {
+    const buyer = buyers.find(b => b.id === op.buyer_id);
+    const supplier = suppliers.find(s => s.id === op.supplier_id);
+    if (!buyer || !supplier) {
+      await logFeed(`⚠️ Could not draft contract for "${op.title}" — buyer or supplier record not found locally.`, T.red);
+      return;
+    }
+    if (buyer.dnc || supplier.dnc) {
+      await logFeed(`🚫 Skipped contract for "${op.title}" — ${buyer.dnc ? buyer.name : supplier.name} is marked Do Not Contact.`, T.red);
+      return;
+    }
+    try {
+      const prompt = `Draft a Sales / Purchase Contract for a South African trade brokerage facilitating a deal between two named parties.
+Broker: ${p.legal_name||"[Broker]"}, Reg ${p.reg_no||"[Reg]"}, ${p.address||""}, ${p.city}, ${p.province}, ${p.country}. Contact ${p.biz_email||""} ${p.biz_phone||""}. Commission ${p.commission_rate||"5"}%.
+Buyer: ${buyer.name} (${buyer.country}). Supplier: ${supplier.name} (${supplier.country}).
+Deal: ${op.title}. Value: ${fmtMoney(op.value, cur)}. Commission: ${fmtMoney(op.commission, cur)}.
+Governing law: South Africa (reference ECTA for e-signatures, POPIA for data where relevant).
+Include all standard clauses (goods, price, Incoterms, delivery, payment terms), numbered, with signature blocks for BOTH named parties. Start with: "TEMPLATE — review with a qualified South African attorney before signing." Return ONLY the document text.`;
+      const data = await callClaude([{ role:"user", content: prompt }], "You are a contracts drafting assistant for a South African trade broker. Output clean document text only.", { maxTokens: 2500 });
+      const { data: doc } = await supabase.from("documents").insert({
+        user_id: uid, type:"Sales Contract",
+        title:`Sales Contract — ${buyer.name} × ${supplier.name}`,
+        content:data.text, counterparty:`${buyer.name} / ${supplier.name}`, opp_title:op.title,
+      }).select().single();
+      if (doc) setDocs(d => [doc, ...d]);
+
+      await supabase.from("opportunities").update({ contract_doc_id: doc?.id || null }).eq("id", op.id);
+      setOpps(prev => prev.map(o => o.id===op.id ? {...o, contract_doc_id: doc?.id} : o));
+
+      const sys = "You are Outreach AI for a trade broker. Write a concise, professional message asking a party to review and sign an attached contract. Written only. No profit guarantees. Sign off with the broker's sign-off.";
+      const draftFor = async (party, otherPartyName, role) => {
+        const channel = party.email ? "email" : (party.phone ? "sms" : "email");
+        const prompt2 = `Draft a ${channel} to ${party.name}, our ${role}, letting them know the Sales Contract for "${op.title}" with ${otherPartyName} is ready for their review and signature. Broker sign-off: "${p.signoff || "Trade Operations"}". Under 120 words. Return JSON: { "subject":"", "body":"" }`;
+        const d2 = await callClaude([{ role:"user", content: prompt2 }], sys);
+        const r2 = parseJSON(d2.text);
+        const row = {
+          user_id: uid, agent: "Outreach AI", channel,
+          recipient_type: role, recipient_name: party.name,
+          to_addr: channel==="sms" ? (party.phone||"") : (party.email||""),
+          subject: r2.subject || `Contract ready — ${op.title}`,
+          body: r2.body || "", rationale: `Contract for opportunity: ${op.title}`,
+          status: "pending", opportunity_id: op.id,
+        };
+        const { data: q } = await supabase.from("queue").insert(row).select().single();
+        if (q) setQueue(prev => [q, ...prev]);
+      };
+      await draftFor(buyer, supplier.name, "buyer");
+      await draftFor(supplier, buyer.name, "supplier");
+
+      await logFeed(`📄 Contract drafted for "${op.title}" — sent to both ${buyer.name} and ${supplier.name} for approval`, T.pink);
+    } catch (e) {
+      await logFeed(`⚠️ Contract draft error for "${op.title}": ${e.message}`, T.red);
+    }
+  };
+
+  // ── SIGNATURE CONFIRMATION (manual — no e-signature service is connected) ──
+  // You mark each side once you've actually received their signed
+  // agreement back. Only when BOTH are true does the deal seal itself:
+  // status flips to Won, commission books, invoice generates.
+  const markSigned = async (op, side) => {
+    const patch = side === "buyer" ? { buyer_signed: true } : { supplier_signed: true };
+    await supabase.from("opportunities").update(patch).eq("id", op.id);
+    const updated = { ...op, ...patch };
+    setOpps(prev => prev.map(o => o.id===op.id ? updated : o));
+    await logFeed(`✍️ ${side === "buyer" ? "Buyer" : "Supplier"} signature confirmed for "${op.title}"`, T.blue);
+
+    if (updated.buyer_signed && updated.supplier_signed) {
+      await supabase.from("opportunities").update({ status:"Won" }).eq("id", op.id);
+      setOpps(prev => prev.map(o => o.id===op.id ? {...o, status:"Won"} : o));
+      await logFeed(`🤝 Both sides signed — "${op.title}" sealed`, T.green);
+      if (Number(op.commission) > 0) { await bookEarning({ ...op, ...patch }); notify(`Deal sealed — commission booked ✓`); }
+    }
   };
 
   // ── INVOICES & DOCS ──
@@ -860,7 +955,16 @@ Include all standard clauses for a ${docType.key}, numbered, with [BRACKETED PLA
               {opps.length===0 ? <Empty icon={IC.opp} title="No opportunities yet" sub="Run the AI team to propose deals from your approved contacts." action="Run AI Team" onAction={runAutopilot} />
                 : <div className="flex flex-col gap-3">{opps.map(op => (
                     <div key={op.id} className="rounded-2xl p-4 flex flex-col md:flex-row md:items-center gap-4" style={{ background:T.card, border:`1px solid ${T.border}` }}>
-                      <div className="flex-1 min-w-0"><div className="text-sm font-bold text-white mb-1">{op.title}</div><div className="flex flex-wrap gap-2"><StatusPill status={op.status} /><Pill label={op.type} color={T.purple} /><Pill label={`Risk: ${op.risk}`} color={op.risk==="Low"?T.green:op.risk==="Medium"?T.amber:T.red} /></div>{op.notes && <p className="text-xs mt-2 leading-relaxed" style={{ color:T.muted }}>{op.notes}</p>}</div>
+                      <div className="flex-1 min-w-0"><div className="text-sm font-bold text-white mb-1">{op.title}</div><div className="flex flex-wrap gap-2"><StatusPill status={op.status} /><Pill label={op.type} color={T.purple} /><Pill label={`Risk: ${op.risk}`} color={op.risk==="Low"?T.green:op.risk==="Medium"?T.amber:T.red} /></div>{op.notes && <p className="text-xs mt-2 leading-relaxed" style={{ color:T.muted }}>{op.notes}</p>}
+                        {op.buyer_id && op.supplier_id && (
+                          <div className="flex flex-wrap items-center gap-2 mt-2">
+                            <Pill label={op.buyer_signed ? "Buyer ✓ Signed" : "Buyer — Pending"} color={op.buyer_signed?T.green:T.amber} />
+                            <Pill label={op.supplier_signed ? "Supplier ✓ Signed" : "Supplier — Pending"} color={op.supplier_signed?T.green:T.amber} />
+                            {!op.buyer_signed && <button onClick={()=>markSigned(op,"buyer")} className="text-xs px-2 py-1 rounded-lg" style={{background:T.blue+"18",color:T.blue}}>Confirm buyer signed</button>}
+                            {!op.supplier_signed && <button onClick={()=>markSigned(op,"supplier")} className="text-xs px-2 py-1 rounded-lg" style={{background:T.blue+"18",color:T.blue}}>Confirm supplier signed</button>}
+                          </div>
+                        )}
+                      </div>
                       <div className="flex items-center gap-5 flex-shrink-0 flex-wrap">
                         <div><div className="text-xs" style={{ color:T.muted }}>Value</div><div className="font-bold text-white">{op.value?`${cur} ${(op.value/1000).toFixed(0)}K`:"—"}</div></div>
                         <div><div className="text-xs" style={{ color:T.muted }}>Commission</div><div className="font-bold" style={{ color:T.green }}>{op.commission?`+${cur} ${Number(op.commission).toLocaleString()}`:"—"}</div></div>
@@ -1170,25 +1274,4 @@ function SettingsTab({ p, setP, saveProfile, emailReady, smsReady }) {
       <div className="flex flex-col gap-4 pt-2">
         <div className="flex items-center gap-2"><SVG d={IC.key} size={14} style={{ color:T.cyan }} /><div className="text-xs font-bold uppercase tracking-widest" style={{ color:T.cyan }}>Integrations — Sending</div></div>
         <p className="text-xs leading-relaxed" style={{ color:T.muted }}>Your own keys so approved messages send automatically. Without them, approving opens your device's app. Stored privately on your account.</p>
-        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${emailReady?T.green:T.border}` }}>
-          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.mail} size={14} style={{ color:T.blue }} /><span className="text-sm font-bold text-white">Email — Resend</span></div><Pill label={emailReady?"Connected":"Not set"} color={emailReady?T.green:T.dim} /></div>
-          <Field label="Resend API Key" hint="resend.com → API Keys (re_…). Verify your domain first."><Input value={p.resend_key||""} onChange={set("resend_key")} type="password" placeholder="re_xxxxxxxx" /></Field>
-          <Field label="From Email" hint="Verified address on your Resend domain."><Input value={p.from_email||""} onChange={set("from_email")} type="email" placeholder="desk@yourdomain.com" /></Field>
-        </div>
-        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${smsReady?T.green:T.border}` }}>
-          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.msg} size={14} style={{ color:T.green }} /><span className="text-sm font-bold text-white">SMS — Twilio</span></div><Pill label={smsReady?"Connected":"Not set"} color={smsReady?T.green:T.dim} /></div>
-          <Field label="Account SID" hint="Twilio Console (AC…)."><Input value={p.twilio_sid||""} onChange={set("twilio_sid")} placeholder="ACxxxxxxxx" /></Field>
-          <Field label="Auth Token"><Input value={p.twilio_token||""} onChange={set("twilio_token")} type="password" placeholder="••••••••" /></Field>
-          <Field label="From Number" hint="E.164, e.g. +14155551234"><Input value={p.twilio_from||""} onChange={set("twilio_from")} placeholder="+14155551234" /></Field>
-        </div>
-        <Btn onClick={()=>saveProfile({ resend_key:p.resend_key, from_email:p.from_email, twilio_sid:p.twilio_sid, twilio_token:p.twilio_token, twilio_from:p.twilio_from })} full color={T.cyan}>Save Integrations</Btn>
-        <div className="text-xs leading-relaxed p-3 rounded-xl" style={{ background:T.amber+"0d", color:T.muted, border:`1px solid ${T.amber}22` }}><span className="font-semibold" style={{ color:T.amber }}>Note: </span>Some providers block direct browser calls (CORS). If a send fails, route it through a small serverless relay (Cloudflare Worker / Vercel function).</div>
-      </div>
-
-      <div className="p-4 rounded-2xl" style={{ background:T.card, border:`1px solid ${T.red}30` }}>
-        <div className="font-bold text-xs mb-3" style={{ color:T.red }}>System Constraints — Non-Negotiable</div>
-        {["Written messages only — no calls or video","No meetings arranged","No profit guarantees","No contracts executed by the AI","AI never impersonates a human","Every message and lead requires your approval","AI-proposed leads are candidates, not confirmed buyers"].map((c,i)=>(<div key={i} className="flex items-start gap-2 text-xs mb-1.5" style={{ color:T.muted }}><SVG d={IC.lock} size={11} style={{ color:T.red, flexShrink:0, marginTop:1 }} />{c}</div>))}
-      </div>
-    </div>
-  );
-}
+        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, bor
