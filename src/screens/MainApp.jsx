@@ -1271,14 +1271,9 @@ function SettingsTab({ p, setP, saveProfile, emailReady, smsReady }) {
         <Btn onClick={()=>saveProfile({ legal_name:p.legal_name, reg_no:p.reg_no, vat_no:p.vat_no, address:p.address, city:p.city, province:p.province, biz_email:p.biz_email, biz_phone:p.biz_phone, commission_rate:p.commission_rate, bank_name:p.bank_name, account_name:p.account_name, account_no:p.account_no, bank_branch:p.bank_branch, branch_code:p.branch_code, swift:p.swift, currency:p.currency, iban:p.iban })} full color={T.pink}>Save Business & Banking</Btn>
       </div>
 
-      flex-col gap-4 pt-2">
+      <div className="flex flex-col gap-4 pt-2">
         <div className="flex items-center gap-2"><SVG d={IC.key} size={14} style={{ color:T.cyan }} /><div className="text-xs font-bold uppercase tracking-widest" style={{ color:T.cyan }}>Integrations — Sending</div></div>
         <p className="text-xs leading-relaxed" style={{ color:T.muted }}>Your own keys so approved messages send automatically. Without them, approving opens your device's app. Stored privately on your account.</p>
-        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${emailReady?T.green:T.border}` }}>
-          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.mail} size={14} style={{ color:T.blue }} /><span className="text-sm font-bold text-white">Email — Resend</span></div><Pill label={emailReady?"Connected":"Not set"} color={emailReady?T.green:T.dim} /></div>
-          <Field label="Resend API Key" hint="resend.com → API Keys (re_…). Verify your domain first."><Input value={p.resend_key||""} onChange={set("resend_key")} type="password" placeholder="re_xxxxxxxx" /></Field>
-          <Field label="From Email" hint="Verified address on your Resend domain."><Input value={p.from_email||""} onChange={set("from_email")} type="email" placeholder="desk@yourdomain.com" /></Field>
-        </div>
         <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${smsReady?T.green:T.border}` }}>
           <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.msg} size={14} style={{ color:T.green }} /><span className="text-sm font-bold text-white">SMS — Twilio</span></div><Pill label={smsReady?"Connected":"Not set"} color={smsReady?T.green:T.dim} /></div>
           <Field label="Account SID" hint="Twilio Console (AC…)."><Input value={p.twilio_sid||""} onChange={set("twilio_sid")} placeholder="ACxxxxxxxx" /></Field>
