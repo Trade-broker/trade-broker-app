@@ -1271,7 +1271,28 @@ function SettingsTab({ p, setP, saveProfile, emailReady, smsReady }) {
         <Btn onClick={()=>saveProfile({ legal_name:p.legal_name, reg_no:p.reg_no, vat_no:p.vat_no, address:p.address, city:p.city, province:p.province, biz_email:p.biz_email, biz_phone:p.biz_phone, commission_rate:p.commission_rate, bank_name:p.bank_name, account_name:p.account_name, account_no:p.account_no, bank_branch:p.bank_branch, branch_code:p.branch_code, swift:p.swift, currency:p.currency, iban:p.iban })} full color={T.pink}>Save Business & Banking</Btn>
       </div>
 
-      <div className="flex flex-col gap-4 pt-2">
+      flex-col gap-4 pt-2">
         <div className="flex items-center gap-2"><SVG d={IC.key} size={14} style={{ color:T.cyan }} /><div className="text-xs font-bold uppercase tracking-widest" style={{ color:T.cyan }}>Integrations — Sending</div></div>
         <p className="text-xs leading-relaxed" style={{ color:T.muted }}>Your own keys so approved messages send automatically. Without them, approving opens your device's app. Stored privately on your account.</p>
-        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, bor
+        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${emailReady?T.green:T.border}` }}>
+          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.mail} size={14} style={{ color:T.blue }} /><span className="text-sm font-bold text-white">Email — Resend</span></div><Pill label={emailReady?"Connected":"Not set"} color={emailReady?T.green:T.dim} /></div>
+          <Field label="Resend API Key" hint="resend.com → API Keys (re_…). Verify your domain first."><Input value={p.resend_key||""} onChange={set("resend_key")} type="password" placeholder="re_xxxxxxxx" /></Field>
+          <Field label="From Email" hint="Verified address on your Resend domain."><Input value={p.from_email||""} onChange={set("from_email")} type="email" placeholder="desk@yourdomain.com" /></Field>
+        </div>
+        <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background:T.card, border:`1px solid ${smsReady?T.green:T.border}` }}>
+          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><SVG d={IC.msg} size={14} style={{ color:T.green }} /><span className="text-sm font-bold text-white">SMS — Twilio</span></div><Pill label={smsReady?"Connected":"Not set"} color={smsReady?T.green:T.dim} /></div>
+          <Field label="Account SID" hint="Twilio Console (AC…)."><Input value={p.twilio_sid||""} onChange={set("twilio_sid")} placeholder="ACxxxxxxxx" /></Field>
+          <Field label="Auth Token"><Input value={p.twilio_token||""} onChange={set("twilio_token")} type="password" placeholder="••••••••" /></Field>
+          <Field label="From Number" hint="E.164, e.g. +14155551234"><Input value={p.twilio_from||""} onChange={set("twilio_from")} placeholder="+14155551234" /></Field>
+        </div>
+        <Btn onClick={()=>saveProfile({ resend_key:p.resend_key, from_email:p.from_email, twilio_sid:p.twilio_sid, twilio_token:p.twilio_token, twilio_from:p.twilio_from })} full color={T.cyan}>Save Integrations</Btn>
+        <div className="text-xs leading-relaxed p-3 rounded-xl" style={{ background:T.amber+"0d", color:T.muted, border:`1px solid ${T.amber}22` }}><span className="font-semibold" style={{ color:T.amber }}>Note: </span>Some providers block direct browser calls (CORS). If a send fails, route it through a small serverless relay (Cloudflare Worker / Vercel function).</div>
+      </div>
+
+      <div className="p-4 rounded-2xl" style={{ background:T.card, border:`1px solid ${T.red}30` }}>
+        <div className="font-bold text-xs mb-3" style={{ color:T.red }}>System Constraints — Non-Negotiable</div>
+        {["Written messages only — no calls or video","No meetings arranged","No profit guarantees","No contracts executed by the AI","AI never impersonates a human","Every message and lead requires your approval","AI-proposed leads are candidates, not confirmed buyers"].map((c,i)=>(<div key={i} className="flex items-start gap-2 text-xs mb-1.5" style={{ color:T.muted }}><SVG d={IC.lock} size={11} style={{ color:T.red, flexShrink:0, marginTop:1 }} />{c}</div>))}
+      </div>
+    </div>
+  );
+}
